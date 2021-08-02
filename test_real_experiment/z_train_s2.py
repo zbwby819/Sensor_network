@@ -1,20 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Aug  2 13:30:28 2021
 
 @author: Win10
 """
-
 import copy
-import imageio
 import datetime
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from resnet import resnet_sensor_network, sensor_cnn
-from spektral.layers import GraphConv, GraphAttention
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Input, Concatenate, Flatten, Reshape
 from tensorflow.keras.preprocessing import image
 from spektral.utils import localpooling_filter
 from loc2dir import theta
@@ -30,31 +23,32 @@ ZERO_TOLERANCE = 1e-10
 pixel_dim = 84
 input_shape = (pixel_dim,pixel_dim*4,3)   
 action_dim = 2
-num_sensors = 10
+num_sensor = 4
+sensor_dis_threshold = 20
 
 all_sensors = []
-for i in range(num_sensors):
+for i in range(num_sensor):
     all_sensors.append('sensor_{}'.format(i+1))
 
+sensor_per_map = [4,5,7,6,8,9,9,10,10,10,10,10]
 ######################################################################
-def collect_sen_obs(num_sensors, path='training/'):
-    num_sensors = 9
-    all_sensor_input = np.zeros((num_sensors, 84, 84*4, 3))
+def collect_sen_obs(num_sensors=num_sensor , path='training/'):
+    all_sensor_input = np.zeros((num_sensors, pixel_dim, pixel_dim*4, 3))
     #all_sensor_output = np.zeros((num_sensors, 2))
     for idx_sensor in range(num_sensors):
         sensor_path = path + all_sensors[idx_sensor]
-        img_1 = image.load_img(sensor_path+'/1/1.png', target_size=(84,84))  #height-width
+        img_1 = image.load_img(sensor_path+'/1/1.png', target_size=(pixel_dim,pixel_dim))  #height-width
         img_array_1 = image.img_to_array(img_1)
-        img_2 = image.load_img(sensor_path+'/2/1.png', target_size=(84,84))  #height-width
+        img_2 = image.load_img(sensor_path+'/2/1.png', target_size=(pixel_dim,pixel_dim))  #height-width
         img_array_2 = image.img_to_array(img_2)
-        img_3 = image.load_img(sensor_path+'/3/1.png', target_size=(84,84))  #height-width
+        img_3 = image.load_img(sensor_path+'/3/1.png', target_size=(pixel_dim,pixel_dim))  #height-width
         img_array_3 = image.img_to_array(img_3)
-        img_4 = image.load_img(sensor_path+'/4/1.png', target_size=(84,84))  #height-width
+        img_4 = image.load_img(sensor_path+'/4/1.png', target_size=(pixel_dim,pixel_dim))  #height-width
         img_array_4 = image.img_to_array(img_4)  
-        all_sensor_input[idx_sensor,:, 84*3:84*4,:] = img_array_1/255 
-        all_sensor_input[idx_sensor,:, 84*2:84*3,:] = img_array_2/255
-        all_sensor_input[idx_sensor,:, 84*1:84*2,:] = img_array_3/255
-        all_sensor_input[idx_sensor,:, 84*0:84*1,:] = img_array_4/255   
+        all_sensor_input[idx_sensor,:, pixel_dim*3:pixel_dim*4,:] = img_array_1/255 
+        all_sensor_input[idx_sensor,:, pixel_dim*2:pixel_dim*3,:] = img_array_2/255
+        all_sensor_input[idx_sensor,:, pixel_dim*1:pixel_dim*2,:] = img_array_3/255
+        all_sensor_input[idx_sensor,:, pixel_dim*0:pixel_dim*1,:] = img_array_4/255   
     return all_sensor_input
 
 def form_obs(cur_state, sensor_input=None):
@@ -81,7 +75,7 @@ def cal_admatrix_sensor(sensor_loc, num_sensors=None):
     ad_matrix4 = np.zeros((num_sensors,num_sensors))
     for i in range(num_sensors-1):
         for j in range(i+1, num_sensors):
-            if np.sqrt((sensor_loc[i][0]-sensor_loc[j][0])**2+(sensor_loc[i][1]-sensor_loc[j][1])**2) <=15:
+            if np.sqrt((sensor_loc[i][0]-sensor_loc[j][0])**2+(sensor_loc[i][1]-sensor_loc[j][1])**2) <=sensor_dis_threshold:
                 ad_matrix1[i,j] = 1
                 ad_matrix1[j,i] = 1
     
@@ -114,52 +108,20 @@ def cal_admatrix_sensor(sensor_loc, num_sensors=None):
                     if k!= i and sensor_nei[k] == 1 and ad_matrix1[k,i] == 0 and ad_matrix2[k, i] == 0 and ad_matrix3[k, i] == 0:
                         ad_matrix4[k,i] = 1
                         ad_matrix4[i,k] = 1
-    return np.expand_dims(ad_matrix1, axis=0), np.expand_dims(ad_matrix2,axis=0), np.expand_dims(ad_matrix3,axis=0), np.expand_dims(ad_matrix4,axis=0)
+    #return np.expand_dims(ad_matrix1, axis=0), np.expand_dims(ad_matrix2,axis=0), np.expand_dims(ad_matrix3,axis=0), np.expand_dims(ad_matrix4,axis=0)
+    return ad_matrix1
 
-def cal_admatrix(pos, env_index, num_sensors, path='training/'):
+def cal_admatrix(pos, env_index, num_sensors=num_sensor, path='training/'):
     robot_loc = pos
-    sensor_loc = np.load(path+'env_{}_{}_1_loc.npy'.format(env_index+1, num_sensors))
+    sensor_loc = np.load(path+'env_{}_sensor.npy'.format(env_index+1))
     ad_matrix1 = np.zeros((num_sensors+1,num_sensors+1))
-    ad_matrix2 = np.zeros((num_sensors+1,num_sensors+1))
-    ad_matrix3 = np.zeros((num_sensors+1,num_sensors+1))
-    ad_matrix4 = np.zeros((num_sensors+1,num_sensors+1))
-    ad_matrix1[:num_sensors,:num_sensors] = np.load(path+'env_{}_{}_1_ad1.npy'.format(env_index+1, num_sensors))
-    ad_matrix2[:num_sensors,:num_sensors] = np.load(path+'env_{}_{}_1_ad2.npy'.format(env_index+1, num_sensors))
-    ad_matrix3[:num_sensors,:num_sensors] = np.load(path+'env_{}_{}_1_ad3.npy'.format(env_index+1, num_sensors))
-    ad_matrix4[:num_sensors,:num_sensors] = np.load(path+'env_{}_{}_1_ad4.npy'.format(env_index+1, num_sensors))
-    for j, sen in enumerate(sensor_loc):
-        if np.sqrt((robot_loc[0]-sen[0])**2+(robot_loc[-1]-sen[-1])**2) <= 15:
-            ad_matrix1[-1, j] = 1
-            ad_matrix1[j, -1] = 1
+    ad_matrix1[:num_sensors,:num_sensors] = cal_admatrix_sensor(sensor_loc, num_sensors=None)
     
     for i in range(num_sensors):
-        if ad_matrix1[-1,i] == 1:
-            index = i
-            sensor_nei = ad_matrix1[index,:]
-            for j in range(num_sensors):
-                if sensor_nei[j] == 1 and ad_matrix1[j, -1] == 0:
-                    ad_matrix2[-1, j] = 1
-                    ad_matrix2[j, -1] = 1
-
-    for i in range(num_sensors):
-        if ad_matrix2[-1,i] == 1:
-            index = i
-            sensor_nei = ad_matrix1[index,:]
-            for j in range(num_sensors):
-                if sensor_nei[j] == 1 and ad_matrix1[j, -1] == 0 and ad_matrix2[j, -1] == 0:
-                    ad_matrix3[-1, j] = 1
-                    ad_matrix3[j, -1] = 1
-
-    for i in range(num_sensors):
-        if ad_matrix3[-1,i] == 1:
-            index = i
-            sensor_nei = ad_matrix1[index,:]
-            for j in range(num_sensors):
-                if sensor_nei[j] == 1 and ad_matrix1[j, -1] == 0 and ad_matrix2[j, -1] == 0 and ad_matrix3[j, -1] == 0:
-                    ad_matrix4[-1, j] = 1
-                    ad_matrix4[j, -1] = 1
-    return np.expand_dims(ad_matrix1, axis=0), np.expand_dims(ad_matrix2,axis=0), np.expand_dims(ad_matrix3,axis=0), np.expand_dims(ad_matrix4,axis=0)
-
+        if np.sqrt((robot_loc[0]-sensor_loc[i][0])**2+(robot_loc[1]-sensor_loc[i][1])**2) <=sensor_dis_threshold:
+            ad_matrix1[-1][i] = 1
+            ad_matrix1[i][-1] = 1 
+    return np.expand_dims(ad_matrix1, axis=0)
 
 def cal_connect_point(cur_state, env):
     robot_loc = [-cur_state[-1][0][5], 0.5, cur_state[-1][0][3]]  
@@ -289,8 +251,8 @@ class PPO:
 
         self.lr = 1e-6
         # Define and initialize network
-        self.policy = load_model_gcn(num_sensors)
-        self.policy_cnn = load_model_gcn(num_sensors)
+        self.policy = load_model_gcn(num_sensor)
+        self.policy_cnn = load_model_gcn(num_sensor)
         self.model_optimizer = Adam(learning_rate=self.lr)
         #print(self.policy.summary())
         # Stdev for continuous action
@@ -417,7 +379,7 @@ class PPO:
         else:
             cur_obs = np.zeros((len(state),1,84,336,3))  
             for j in range(len(state)):  
-                new_state = form_obs_cnn(state[j])
+                new_state = form_obs(state[j])
                 cur_obs[j] = new_state
                 robot_pos = [-state[j][-1][0][5], 0.5, state[j][-1][0][3]]
             output, value = self.policy_cnn([cur_obs[:,0]])
@@ -453,7 +415,7 @@ class PPO:
                                                  np.expand_dims(cur_obs[9], axis=0), ad_matrix1, ad_matrix2, ad_matrix3, ad_matrix4])
         else:
             robot_pos = [-state[-1][0][5], 0.5, state[-1][0][3]]
-            cur_obs = form_obs_cnn(state)
+            cur_obs = form_obs(state)
             output, value = self.policy_cnn.predict([cur_obs])
         output = tf.clip_by_value(output, -1, 1)
         dist = self.get_dist(output)
