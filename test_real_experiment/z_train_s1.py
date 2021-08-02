@@ -11,20 +11,16 @@ import os, cv2, math
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from tensorflow.keras.applications.resnet50 import ResNet50
 from tensorflow.keras.preprocessing import image
-from tensorflow.keras.applications.resnet50 import preprocess_input, decode_predictions
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Input, Concatenate, Flatten, Reshape
 from keras.callbacks import TensorBoard
-from resnet import resnet_sensor_network, sensor_cnn
 from spektral.layers import GCNConv, GATConv
 from spektral.utils import gcn_filter
 from loc2dir import theta, angle2xy
 from keras_lr_multiplier import LRMultiplier
 from tensorflow.keras.layers import (
-    Input,Conv2D, UpSampling2D, MaxPooling2D, AveragePooling2D, Concatenate )
+    Input,Conv2D, Dense, UpSampling2D, MaxPooling2D, AveragePooling2D, Concatenate, Flatten, Reshape )
 
 #################################################################   hyper parameters
 batch_size = 32
@@ -33,10 +29,11 @@ max_num_sensors = 10
 max_env_map = 10
 pixel_dim = 84  # image size 
 input_shape = (pixel_dim,pixel_dim*4,3)  # input size 
-sensor_dis = 20  # distance for admatrix   20 == full connection
+sensor_dis_threshold = 20  # distance for admatrix   20 == full connection
+init_lr = 3e-4
    
 #################################################################    load_input
-def load_input(num_sensors, select_case, select_env=1, path='training/'):
+def load_input(num_sensors=4, select_case=np.arange(2,33), select_env=1, path='training/'):
     # load path for sensors
     all_sensors = []
     for kk in range(num_sensors):
@@ -69,9 +66,9 @@ def load_input(num_sensors, select_case, select_env=1, path='training/'):
         image_index.append(int(filelist[i][:-4]))
     return np.array(all_input), image_index
 
-def read_target(label_path, select_case):
+def read_target(select_case=np.arange(2,33), target_path='training/env_1/target_loc.txt'):
     target_loc = []    
-    target_label = open(label_path,"r") 
+    target_label = open(target_path,"r") 
     lines = target_label.readlines() 
     for i in range(len(select_case)):
         label_index = lines[select_case[i]-1].index(')')
@@ -109,21 +106,20 @@ def load_label(select_env, num_sensors, image_index):
     return all_target_label
 
 ##################################################################################       
-def cal_admatrix(pos, env_index, num_sensors=10, sensor_dis = sensor_dis):
-    robot_loc = pos
+def cal_admatrix(env_index=1, num_sensors=4, sensor_dis = sensor_dis_threshold):
     sensor_loc = np.load('training/env_{}_sensor.npy'.format(env_index))
-    ad_matrix1 = np.zeros((num_sensors, num_sensors))
+    ad_matrix = np.zeros((num_sensors, num_sensors))
     for s1 in range(num_sensors):
         for s2 in range(num_sensors):
             if s1 != s2:
                 s_dis = np.sqrt((sensor_loc[0][s1]-sensor_loc[0][s2])**2+(sensor_loc[1][s1]-sensor_loc[1][s2])**2)
-                if s_dis <= sensor_dis:
-                    ad_matrix1[s1, s2] = 1
-    return ad_matrix1
+                if s_dis <= sensor_dis_threshold:
+                    ad_matrix[s1, s2] = 1
+    return ad_matrix
     
 #################################################################    build model
 def mlp_model(gnn_unit=256):
-    input_data = Input(shape=gnn_unit+256)
+    input_data = Input(shape=gnn_unit)
     output1 = Dense(128, activation='relu',  name='mlp_1')(input_data)
     output1 = Dense(32, activation='relu',  name='mlp_2')(output1)
     output1 = Dense(2, activation='linear', name='sensors')(output1)  
@@ -148,7 +144,7 @@ def cnn_model(input_shape=(pixel_dim,pixel_dim*4,3)):
     output_layer = Reshape((1,h.shape[-1]))(h)
     return Model(input_layer, output_layer)
 
-def load_model_gcn(num_sensors, input_shape=(pixel_dim,pixel_dim*4,3), gnn_layers=2, gnn_unit=128, is_robot=0):
+def load_model_gcn(num_sensors, input_shape=(pixel_dim,pixel_dim*4,3), gnn_layers=2, gnn_unit=256, is_robot=0):
     
     input_data, output_data = [], []   
     #tf.compat.v1.enable_eager_execution()
@@ -195,9 +191,9 @@ def train_model(num_epoch, num_batch, num_maps=10, lr_decay=True, is_robot=0, is
         if lr_decay:
             cur_lr = init_lr/np.sqrt(ep+1)
         
-        select_env = np.randint(10)
+        select_env = np.random.randint(10)
         num_sensors = sensor_per_map[select_env]
-        select_case = np.arange(200)
+        select_case = np.arange(2,33)
         np.random.shuffle(select_case)
         select_case = select_case[:32]
         input_image, image_index = load_input(num_sensors, select_case, select_env)
@@ -231,12 +227,10 @@ def train_model(num_epoch, num_batch, num_maps=10, lr_decay=True, is_robot=0, is
         #z_res = model.predict(input_data)
                 
 ##################################################################
-init_lr = 3e-4
-tf.config.run_functions_eagerly(True)
-train_model(num_epoch=max_train_iter, num_batch=batch_size, num_maps = max_env_map)
+#tf.config.run_functions_eagerly(True)
+#train_model(num_epoch=max_train_iter, num_batch=batch_size, num_maps = max_env_map)
 
 ################################################################## plot history
-import pandas as pd
 #history_loss = pd.read_csv('training/history.csv')
 #all_loss = history_loss['loss']
 #s1_loss = history_loss['model_4_loss']
